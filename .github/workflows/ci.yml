@@ -36,7 +36,7 @@ jobs:
         run: swift build --build-tests
 
       - name: Test
-        run: swift test --parallel
+        run: swift test
 
       - name: Check the app bundle script is intact
         run: bash -n build.sh && echo "build.sh parses cleanly"
