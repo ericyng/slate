@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+Slate.app/
+Resources/AppIcon.icns
+*.xcuserstate
+.DS_Store
+SecondVault/
