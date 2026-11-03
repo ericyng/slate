@@ -2,6 +2,8 @@
 
 Native macOS markdown notes — the calm three-pane feel of Apple Notes, the plain-folder honesty of Obsidian.
 
+[![CI](https://github.com/ericyng/slate/actions/workflows/ci.yml/badge.svg)](https://github.com/ericyng/slate/actions/workflows/ci.yml)
+
 ![Slate with a vault open](docs/images/slate-window.png)
 
 Every note is a real `.md` file in a folder you choose. Folders are notebooks. There is no database, so the vault opens in any editor, syncs with iCloud or git, and outlives the app.
