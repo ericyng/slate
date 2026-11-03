@@ -111,7 +111,7 @@ struct DetailView: View {
             Spacer(minLength: 0)
 
             if prefs.showWordCount {
-                Text("\(wordCount) words")
+                Text("\(store.wordCount) words")
                     .font(.system(size: 10.5))
                     .monospacedDigit()
                     .foregroundStyle(.tertiary)
@@ -127,10 +127,6 @@ struct DetailView: View {
         }
         .padding(.horizontal, 20)
         .frame(height: 30)
-    }
-
-    private var wordCount: Int {
-        store.editorText.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
     }
 
     private var emptyState: some View {

@@ -5,9 +5,9 @@ import CoreServices
 final class FSEventsWatcher {
     private var stream: FSEventStreamRef?
     private let url: URL
-    private let handler: () -> Void
+    private let handler: ([String]) -> Void
 
-    init(url: URL, handler: @escaping () -> Void) {
+    init(url: URL, handler: @escaping ([String]) -> Void) {
         self.url = url
         self.handler = handler
         start()
@@ -34,10 +34,23 @@ final class FSEventsWatcher {
             copyDescription: nil
         ))
 
-        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
-            guard let info else { return }
+        // The batch of changed paths is passed through so the store can ignore
+        // its own metadata writes instead of rescanning the whole vault.
+        // UseCFTypes makes eventPaths a CFArray of CFString; without that flag
+        // it is a C string array and reading it as CFArray segfaults.
+        let callback: FSEventStreamCallback = { _, info, numEvents, eventPaths, _, _ in
+            guard let info, numEvents > 0 else { return }
             let watcher = Unmanaged<FSEventsWatcher>.fromOpaque(info).takeUnretainedValue()
-            DispatchQueue.main.async { watcher.handler() }
+            let array = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue()
+            var paths: [String] = []
+            let count = CFArrayGetCount(array)
+            paths.reserveCapacity(count)
+            for i in 0..<count {
+                guard let raw = CFArrayGetValueAtIndex(array, i) else { continue }
+                let path = Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue()
+                paths.append(path as String)
+            }
+            DispatchQueue.main.async { watcher.handler(paths) }
         }
 
         let paths = [url.path] as CFArray
@@ -48,7 +61,9 @@ final class FSEventsWatcher {
             paths,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             0.4,
-            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents
+                                     | kFSEventStreamCreateFlagNoDefer
+                                     | kFSEventStreamCreateFlagUseCFTypes)
         ) else {
             context.deinitialize(count: 1)
             context.deallocate()

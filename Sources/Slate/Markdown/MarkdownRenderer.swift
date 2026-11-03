@@ -29,28 +29,55 @@ enum MarkdownTheme {
     static let codeColor = NSColor.systemPink
     static let quoteColor = NSColor.secondaryLabelColor
 
+    // MARK: - Font cache
+
+    /// Repainting allocates a font per row; the same handful of sizes and
+    /// faces come back every keystroke, so they are built once.
+    private static let lock = NSLock()
+    private static var fonts: [FontKey: NSFont] = [:]
+
+    private struct FontKey: Hashable {
+        enum Face: Hashable { case regular, bold, italic, boldItalic, mono }
+        let face: Face
+        let size: CGFloat
+    }
+
+    private static func font(_ face: FontKey.Face, _ size: CGFloat, _ make: () -> NSFont) -> NSFont {
+        let key = FontKey(face: face, size: size)
+        lock.lock()
+        defer { lock.unlock() }
+        if let hit = fonts[key] { return hit }
+        let font = make()
+        fonts[key] = font
+        return font
+    }
+
     static func body(size: CGFloat = bodySize) -> NSFont {
-        NSFont.systemFont(ofSize: size)
+        font(.regular, size) { NSFont.systemFont(ofSize: size) }
     }
 
     static func bold(size: CGFloat = bodySize) -> NSFont {
-        NSFont.systemFont(ofSize: size, weight: .bold)
+        font(.bold, size) { NSFont.systemFont(ofSize: size, weight: .bold) }
     }
 
     static func italic(size: CGFloat = bodySize) -> NSFont {
-        let base = NSFont.systemFont(ofSize: size)
-        let descriptor = base.fontDescriptor.withSymbolicTraits(.italic)
-        return NSFont(descriptor: descriptor, size: size) ?? base
+        font(.italic, size) {
+            let base = NSFont.systemFont(ofSize: size)
+            let descriptor = base.fontDescriptor.withSymbolicTraits(.italic)
+            return NSFont(descriptor: descriptor, size: size) ?? base
+        }
     }
 
     static func boldItalic(size: CGFloat = bodySize) -> NSFont {
-        let base = NSFont.systemFont(ofSize: size, weight: .bold)
-        let descriptor = base.fontDescriptor.withSymbolicTraits([.italic])
-        return NSFont(descriptor: descriptor, size: size) ?? base
+        font(.boldItalic, size) {
+            let base = NSFont.systemFont(ofSize: size, weight: .bold)
+            let descriptor = base.fontDescriptor.withSymbolicTraits([.italic])
+            return NSFont(descriptor: descriptor, size: size) ?? base
+        }
     }
 
     static func mono(size: CGFloat = monoSize) -> NSFont {
-        NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        font(.mono, size) { NSFont.monospacedSystemFont(ofSize: size, weight: .regular) }
     }
 }
 
@@ -69,13 +96,20 @@ enum MarkdownRenderer {
     /// In live preview, pass the selection range: markers and inline delimiters
     /// are concealed on every block except the one holding the caret, which is
     /// shown raw so it stays editable.
+    ///
+    /// `scope` limits the work to one range of the document. Typing only ever
+    /// repaints the edited block, so on a long note the remaining hundreds of
+    /// blocks are skipped rather than restyled and thrown away.
     static func editorRuns(for doc: MarkdownDocument,
                            bodySize: CGFloat = MarkdownTheme.bodySize,
-                           focusRange: NSRange? = nil) -> [(NSRange, [NSAttributedString.Key: Any])] {
+                           focusRange: NSRange? = nil,
+                           scope: NSRange? = nil) -> [(NSRange, [NSAttributedString.Key: Any])] {
         var runs: [(NSRange, [NSAttributedString.Key: Any])] = []
         let length = doc.text.length
+        let paint = scope.map { NSIntersectionRange($0, NSRange(location: 0, length: length)) }
+            ?? NSRange(location: 0, length: length)
 
-        runs.append((NSRange(location: 0, length: length), [
+        runs.append((paint, [
             .font: MarkdownTheme.body(size: bodySize),
             .foregroundColor: MarkdownTheme.bodyColor,
             .paragraphStyle: paragraphStyle(for: .paragraph, indent: 0, bodySize: bodySize)
@@ -83,6 +117,7 @@ enum MarkdownRenderer {
 
         for block in doc.blocks {
             guard block.range.location != NSNotFound, NSMaxRange(block.range) <= length else { continue }
+            if let scope, NSIntersectionRange(block.range, scope).length == 0 { continue }
             let concealing = focusRange.map { focus in
                 focus.location < block.range.location || focus.location > NSMaxRange(block.range)
             } ?? false
@@ -367,9 +402,38 @@ enum MarkdownRenderer {
 
     // MARK: - Paragraph styles
 
+    private struct ParagraphKey: Hashable {
+        let kind: BlockKind
+        let indent: Int
+        let bodySize: CGFloat
+    }
+
+    private static let paragraphLock = NSLock()
+    private static var paragraphStyles: [ParagraphKey: NSParagraphStyle] = [:]
+
+    /// Styles are immutable once built, so one instance per kind/indent/size is
+    /// shared across rows instead of being allocated per block per repaint.
     static func paragraphStyle(for kind: BlockKind,
                                indent: Int,
                                bodySize: CGFloat = MarkdownTheme.bodySize) -> NSParagraphStyle {
+        let key = ParagraphKey(kind: kind, indent: indent, bodySize: bodySize)
+        paragraphLock.lock()
+        if let hit = paragraphStyles[key] {
+            paragraphLock.unlock()
+            return hit
+        }
+        paragraphLock.unlock()
+
+        let style = makeParagraphStyle(for: kind, indent: indent, bodySize: bodySize)
+        paragraphLock.lock()
+        paragraphStyles[key] = style
+        paragraphLock.unlock()
+        return style
+    }
+
+    private static func makeParagraphStyle(for kind: BlockKind,
+                                           indent: Int,
+                                           bodySize: CGFloat) -> NSParagraphStyle {
         let scale = bodySize / MarkdownTheme.bodySize
         let style = NSMutableParagraphStyle()
         style.lineSpacing = 3.5 * scale

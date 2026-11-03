@@ -159,16 +159,18 @@ struct MarkdownEditor: NSViewRepresentable {
                 return
             }
 
-            let string = textView.string as NSString
+            let text = textView.string
+            let string = text as NSString
             guard string.length == length else { return }
 
             let focus = concealSyntax ? textView.selectedRange() : nil
             lastFocus = focus
 
-            let document = MarkdownParser.parse(textView.string)
-            let runs = MarkdownRenderer.editorRuns(for: document, bodySize: bodySize, focusRange: focus)
+            let document = MarkdownParseCache.shared.document(for: text)
 
-            let fenceCount = Self.fenceCount(in: string)
+            // Fence markers change how everything after them parses, so a change
+            // in their count forces a full restyle.
+            let fenceCount = document.fenceCount
             let structureChanged = lastFenceCount.map { $0 != fenceCount } ?? false
             lastFenceCount = fenceCount
 
@@ -181,6 +183,10 @@ struct MarkdownEditor: NSViewRepresentable {
                 scope = NSRange(location: 0, length: length)
             }
             guard scope.length > 0 else { return }
+
+            // Only blocks that intersect the scope produce runs.
+            let runs = MarkdownRenderer.editorRuns(for: document, bodySize: bodySize,
+                                                   focusRange: focus, scope: scope)
 
             let undo = textView.undoManager
             undo?.disableUndoRegistration()
@@ -236,14 +242,6 @@ struct MarkdownEditor: NSViewRepresentable {
             return NSRange(location: start, length: finish - start)
         }
 
-        private static func fenceCount(in string: NSString) -> Int {
-            var count = 0
-            string.enumerateLines { line, _ in
-                if line.hasPrefix("```") { count += 1 }
-            }
-            return count
-        }
-
         /// Exactly the blank-line-delimited block a caret belongs to, without
         /// the neighbouring-block widening `blockRange` applies. This is what
         /// live preview keys on: a caret move only counts as a block change if
@@ -296,37 +294,71 @@ struct MarkdownPreview: NSViewRepresentable {
             .underlineStyle: NSUnderlineStyle.single.rawValue
         ]
         context.coordinator.textView = textView
+        context.coordinator.scrollView = scrollView
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         let coordinator = context.coordinator
+        coordinator.scrollView = scrollView
         // Typing fires this on every keystroke; skip the work when nothing changed.
         guard coordinator.renderedText != text || coordinator.renderedSize != bodySize else { return }
-        coordinator.renderedText = text
-        coordinator.renderedSize = bodySize
 
-        // Keep the reader's place while the document is re-rendered. A raw
-        // y-offset drifts as the text above it grows, so preserve the fraction
-        // of the scrollable height instead.
-        let visible = scrollView.contentView.bounds
-        let oldMaxY = max(0, textView.frame.height - visible.height)
-        let progress = oldMaxY > 0 ? visible.origin.y / oldMaxY : 0
-
-        let document = MarkdownParser.parse(text)
-        textView.textStorage?.setAttributedString(MarkdownRenderer.rendered(document, bodySize: bodySize))
-        textView.layoutManager?.ensureLayout(for: textView.textContainer!)
-
-        let newMaxY = max(0, textView.frame.height - scrollView.contentView.bounds.height)
-        let target = NSPoint(x: 0, y: min(newMaxY, max(0, progress * newMaxY)))
-        scrollView.contentView.scroll(to: target)
-        scrollView.reflectScrolledClipView(scrollView.contentView)
+        // Rendering the whole document is the expensive part, so a burst of
+        // keystrokes collapses into one render. The first paint is immediate so
+        // switching notes never shows an empty pane.
+        coordinator.pendingText = text
+        coordinator.pendingSize = bodySize
+        if coordinator.renderedText == nil {
+            coordinator.renderNow()
+        } else {
+            coordinator.scheduleRender()
+        }
     }
 
     final class Coordinator {
         weak var textView: NSTextView?
+        weak var scrollView: NSScrollView?
         var renderedText: String?
         var renderedSize: CGFloat?
+        var pendingText: String?
+        var pendingSize: CGFloat?
+        private var renderTask: Task<Void, Never>?
+
+        func scheduleRender() {
+            renderTask?.cancel()
+            renderTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 90_000_000)
+                guard !Task.isCancelled else { return }
+                self?.renderNow()
+            }
+        }
+
+        @MainActor
+        func renderNow() {
+            renderTask?.cancel()
+            renderTask = nil
+            guard let textView, let scrollView, let text = pendingText, let size = pendingSize else { return }
+            pendingText = nil
+            renderedText = text
+            renderedSize = size
+
+            // Keep the reader's place while the document is re-rendered. A raw
+            // y-offset drifts as the text above it grows, so preserve the
+            // fraction of the scrollable height instead.
+            let visible = scrollView.contentView.bounds
+            let oldMaxY = max(0, textView.frame.height - visible.height)
+            let progress = oldMaxY > 0 ? visible.origin.y / oldMaxY : 0
+
+            let document = MarkdownParseCache.shared.document(for: text)
+            textView.textStorage?.setAttributedString(MarkdownRenderer.rendered(document, bodySize: size))
+            textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+
+            let newMaxY = max(0, textView.frame.height - scrollView.contentView.bounds.height)
+            let target = NSPoint(x: 0, y: min(newMaxY, max(0, progress * newMaxY)))
+            scrollView.contentView.scroll(to: target)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
     }
 }

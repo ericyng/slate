@@ -19,7 +19,7 @@ struct InlineSpan {
     var kind: Kind
 }
 
-enum BlockKind: Equatable {
+enum BlockKind: Hashable {
     case heading(Int)
     case paragraph
     case bullet
@@ -47,6 +47,9 @@ struct MarkdownBlock {
 struct MarkdownDocument {
     var text: NSString
     var blocks: [MarkdownBlock]
+    /// Number of code-fence delimiter lines. Everything after a fence parses
+    /// differently, so a change in this count invalidates a scoped restyle.
+    var fenceCount: Int = 0
 
     var title: String {
         for block in blocks {
@@ -86,16 +89,48 @@ struct MarkdownDocument {
                 break
             }
         }
-        if let r = s.range(of: "^\\d{1,3}[.)]\\s+", options: .regularExpression) {
+        if let r = s.range(of: Self.numberedPrefix, options: .regularExpression) {
             s.removeSubrange(r)
         }
 
         // Inline markers.
-        s = s.replacingOccurrences(of: "!\\[([^\\]]*)\\]\\([^)]*\\)", with: "$1", options: .regularExpression)
-        s = s.replacingOccurrences(of: "\\[([^\\]]*)\\]\\([^)]*\\)", with: "$1", options: .regularExpression)
-        s = s.replacingOccurrences(of: "\\*\\*|__|~~|`", with: "", options: .regularExpression)
-        s = s.replacingOccurrences(of: "(?<![A-Za-z0-9])[*_](?=\\S)|(?<=\\S)[*_]", with: "", options: .regularExpression)
+        s = Self.replacing(Self.imagePattern, in: s, with: "$1")
+        s = Self.replacing(Self.linkPattern, in: s, with: "$1")
+        s = Self.replacing(Self.delimiterPattern, in: s, with: "")
+        s = Self.replacing(Self.emphasisPattern, in: s, with: "")
         return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    // MARK: - Cached regular expressions
+
+    /// `plainText` runs once per note at scan time and again on every title
+    /// derivation, so its patterns are compiled once instead of per call.
+    private static let numberedPrefix = "^\\d{1,3}[.)]\\s+"
+    private static let imagePattern = "!\\[([^\\]]*)\\]\\([^)]*\\)"
+    private static let linkPattern = "\\[([^\\]]*)\\]\\([^)]*\\)"
+    private static let delimiterPattern = "\\*\\*|__|~~|`"
+    private static let emphasisPattern = "(?<![A-Za-z0-9])[*_](?=\\S)|(?<=\\S)[*_]"
+
+    private static func replacing(_ pattern: String, in string: String, with template: String) -> String {
+        guard let regex = RegexCache.shared.regex(pattern) else { return string }
+        let range = NSRange(location: 0, length: (string as NSString).length)
+        return regex.stringByReplacingMatches(in: string, range: range, withTemplate: template)
+    }
+}
+
+/// Small thread-safe cache of compiled patterns.
+final class RegexCache {
+    static let shared = RegexCache()
+    private let lock = NSLock()
+    private var cache: [String: NSRegularExpression] = [:]
+
+    func regex(_ pattern: String) -> NSRegularExpression? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let hit = cache[pattern] { return hit }
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        cache[pattern] = regex
+        return regex
     }
 }
 
@@ -103,12 +138,15 @@ enum MarkdownParser {
 
     static func parse(_ string: String) -> MarkdownDocument {
         let ns = string as NSString
+        let length = ns.length
         var blocks: [MarkdownBlock] = []
-        var index = 0
+        blocks.reserveCapacity(length / 40)
+
         var inCode = false
         var codeLanguage: String?
         var codeContentStart = 0
         var codeBlockStart = 0
+        var fenceCount = 0
 
         func flushCode(contentEnd: Int) {
             let range = NSRange(location: codeBlockStart, length: max(0, contentEnd - codeBlockStart))
@@ -122,147 +160,153 @@ enum MarkdownParser {
             ))
         }
 
-        while index < ns.length {
-            let lineRange = ns.lineRange(for: NSRange(location: index, length: 0))
-            let rawLine = ns.substring(with: lineRange)
-            let hasNewline = rawLine.hasSuffix("\n")
-            let line = hasNewline ? String(rawLine.dropLast()) : rawLine
-            let contentEnd = lineRange.location + (hasNewline ? lineRange.length - 1 : lineRange.length)
+        var lineStart = 0
+        while lineStart < length {
+            // Line bounds, scanned with characters instead of lineRange +
+            // substring: this loop runs once per line on every keystroke.
+            var contentEnd = lineStart
+            while contentEnd < length, char(ns, contentEnd) != 0x0A { contentEnd += 1 }
+            let hasNewline = contentEnd < length
+            let lineEnd = hasNewline ? contentEnd + 1 : contentEnd
+            let lineRange = NSRange(location: lineStart, length: lineEnd - lineStart)
 
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Indent.
+            var first = lineStart
+            while first < contentEnd, char(ns, first) == 0x20 || char(ns, first) == 0x09 { first += 1 }
+            let indent = first - lineStart
+            let isEmpty = first == contentEnd
 
             if inCode {
-                if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
-                    flushCode(contentEnd: lineRange.location)
+                if isFenceLine(ns, from: first, to: contentEnd) {
+                    flushCode(contentEnd: lineStart)
                     inCode = false
                     codeLanguage = nil
-                    index = NSMaxRange(lineRange)
-                    continue
+                    fenceCount += 1
                 }
-                index = NSMaxRange(lineRange)
+                lineStart = lineEnd
                 continue
             }
 
-            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+            if isFenceLine(ns, from: first, to: contentEnd) {
                 inCode = true
-                codeBlockStart = lineRange.location
-                let lang = trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces)
+                fenceCount += 1
+                codeBlockStart = lineStart
+                let langStart = min(fenceLength(ns, from: first, to: contentEnd) + first, contentEnd)
+                var langEnd = contentEnd
+                while langEnd > langStart, char(ns, langEnd - 1) == 0x20 || char(ns, langEnd - 1) == 0x09 { langEnd -= 1 }
+                let lang = langEnd > langStart ? ns.substring(with: NSRange(location: langStart, length: langEnd - langStart)) : ""
                 codeLanguage = lang.isEmpty ? nil : lang
-                codeContentStart = NSMaxRange(lineRange)
-                index = NSMaxRange(lineRange)
+                codeContentStart = lineEnd
+                lineStart = lineEnd
                 continue
             }
 
-            let indent = line.prefix { $0 == " " }.count + line.prefix { $0 == "\t" }.count * 2
-
-            if trimmed.hasPrefix("|") {
-                blocks.append(MarkdownBlock(kind: .table, range: lineRange,
-                                            contentRange: NSRange(location: lineRange.location, length: contentEnd - lineRange.location),
-                                            markerRange: nil, indent: 0, inlines: []))
-                index = NSMaxRange(lineRange)
-                continue
-            }
-
-            if trimmed.isEmpty {
+            if isEmpty {
                 blocks.append(MarkdownBlock(kind: .blank, range: lineRange,
-                                            contentRange: NSRange(location: lineRange.location, length: 0),
+                                            contentRange: NSRange(location: lineStart, length: 0),
                                             markerRange: nil, indent: 0, inlines: []))
-                index = NSMaxRange(lineRange)
+                lineStart = lineEnd
                 continue
             }
 
-            // Horizontal rule
-            if isRule(trimmed) {
+            let contentRange = NSRange(location: lineStart, length: contentEnd - lineStart)
+            let head = char(ns, first)
+
+            // Table row.
+            if head == 0x7C { // |
+                blocks.append(MarkdownBlock(kind: .table, range: lineRange,
+                                            contentRange: contentRange,
+                                            markerRange: nil, indent: 0, inlines: []))
+                lineStart = lineEnd
+                continue
+            }
+
+            // Horizontal rule.
+            if isRule(ns, from: first, to: contentEnd) {
                 blocks.append(MarkdownBlock(kind: .rule, range: lineRange,
-                                            contentRange: NSRange(location: lineRange.location, length: contentEnd - lineRange.location),
+                                            contentRange: contentRange,
                                             markerRange: nil, indent: 0, inlines: []))
-                index = NSMaxRange(lineRange)
+                lineStart = lineEnd
                 continue
             }
 
-            // ATX heading
-            if let heading = headingMatch(line) {
-                let markerLen = heading.markerLength
-                let contentStart = lineRange.location + markerLen
-                let contentRange = NSRange(location: contentStart, length: max(0, contentEnd - contentStart))
+            // ATX heading.
+            if head == 0x23, let heading = headingMatch(ns, from: first, to: contentEnd) {
+                let contentStart = lineStart + heading.markerLength
+                let headingContent = NSRange(location: contentStart, length: max(0, contentEnd - contentStart))
                 blocks.append(MarkdownBlock(
                     kind: .heading(heading.level),
                     range: lineRange,
-                    contentRange: contentRange,
-                    markerRange: NSRange(location: lineRange.location, length: markerLen),
+                    contentRange: headingContent,
+                    markerRange: NSRange(location: lineStart, length: heading.markerLength),
                     indent: 0,
-                    inlines: inlineSpans(in: ns, range: contentRange)
+                    inlines: inlineSpans(in: ns, range: headingContent)
                 ))
-                index = NSMaxRange(lineRange)
+                lineStart = lineEnd
                 continue
             }
 
-            // Task list item
-            if let task = taskMatch(line) {
-                let contentRange = NSRange(location: lineRange.location + task.contentOffset,
-                                           length: max(0, contentEnd - lineRange.location - task.contentOffset))
-                blocks.append(MarkdownBlock(
-                    kind: .task(done: task.done),
-                    range: lineRange,
-                    contentRange: contentRange,
-                    markerRange: NSRange(location: lineRange.location + task.markerOffset, length: task.contentOffset - task.markerOffset),
-                    indent: indent,
-                    inlines: inlineSpans(in: ns, range: contentRange)
-                ))
-                index = NSMaxRange(lineRange)
-                continue
-            }
-
-            // Bullet
-            if let bullet = bulletMatch(line) {
-                let contentRange = NSRange(location: lineRange.location + bullet.contentOffset,
-                                           length: max(0, contentEnd - lineRange.location - bullet.contentOffset))
+            // Bullet, task and numbered items share one unordered scan.
+            if let bulletContent = unorderedMatch(ns, from: first, to: contentEnd) {
+                if let task = taskMatch(ns, after: bulletContent, to: contentEnd) {
+                    let taskContent = NSRange(location: task.contentStart, length: max(0, contentEnd - task.contentStart))
+                    blocks.append(MarkdownBlock(
+                        kind: .task(done: task.done),
+                        range: lineRange,
+                        contentRange: taskContent,
+                        markerRange: NSRange(location: first, length: task.contentStart - first),
+                        indent: indent,
+                        inlines: inlineSpans(in: ns, range: taskContent)
+                    ))
+                    lineStart = lineEnd
+                    continue
+                }
+                let itemContent = NSRange(location: bulletContent, length: max(0, contentEnd - bulletContent))
                 blocks.append(MarkdownBlock(
                     kind: .bullet,
                     range: lineRange,
-                    contentRange: contentRange,
-                    markerRange: NSRange(location: lineRange.location + bullet.markerOffset, length: bullet.contentOffset - bullet.markerOffset),
+                    contentRange: itemContent,
+                    markerRange: NSRange(location: first, length: bulletContent - first),
                     indent: indent,
-                    inlines: inlineSpans(in: ns, range: contentRange)
+                    inlines: inlineSpans(in: ns, range: itemContent)
                 ))
-                index = NSMaxRange(lineRange)
+                lineStart = lineEnd
                 continue
             }
 
-            // Numbered
-            if let numbered = numberedMatch(line) {
-                let contentRange = NSRange(location: lineRange.location + numbered.contentOffset,
-                                           length: max(0, contentEnd - lineRange.location - numbered.contentOffset))
+            if head >= 0x30, head <= 0x39, let numberedContent = numberedMatch(ns, from: first, to: contentEnd) {
+                let itemContent = NSRange(location: numberedContent, length: max(0, contentEnd - numberedContent))
                 blocks.append(MarkdownBlock(
                     kind: .numbered,
                     range: lineRange,
-                    contentRange: contentRange,
-                    markerRange: NSRange(location: lineRange.location + numbered.markerOffset, length: numbered.contentOffset - numbered.markerOffset),
+                    contentRange: itemContent,
+                    markerRange: NSRange(location: first, length: numberedContent - first),
                     indent: indent,
-                    inlines: inlineSpans(in: ns, range: contentRange)
+                    inlines: inlineSpans(in: ns, range: itemContent)
                 ))
-                index = NSMaxRange(lineRange)
+                lineStart = lineEnd
                 continue
             }
 
-            // Quote
-            if let quoteLength = quoteMatch(line) {
-                let contentRange = NSRange(location: lineRange.location + quoteLength,
-                                           length: max(0, contentEnd - lineRange.location - quoteLength))
+            // Quote.
+            if head == 0x3E { // >
+                var marker = first + 1
+                if marker < contentEnd, char(ns, marker) == 0x20 { marker += 1 }
+                let markerLength = marker - lineStart
+                let quoteContent = NSRange(location: marker, length: max(0, contentEnd - marker))
                 blocks.append(MarkdownBlock(
                     kind: .quote,
                     range: lineRange,
-                    contentRange: contentRange,
-                    markerRange: NSRange(location: lineRange.location, length: quoteLength),
+                    contentRange: quoteContent,
+                    markerRange: NSRange(location: lineStart, length: markerLength),
                     indent: indent,
-                    inlines: inlineSpans(in: ns, range: contentRange)
+                    inlines: inlineSpans(in: ns, range: quoteContent)
                 ))
-                index = NSMaxRange(lineRange)
+                lineStart = lineEnd
                 continue
             }
 
-            // Paragraph
-            let contentRange = NSRange(location: lineRange.location, length: contentEnd - lineRange.location)
+            // Paragraph.
             blocks.append(MarkdownBlock(
                 kind: .paragraph,
                 range: lineRange,
@@ -271,70 +315,98 @@ enum MarkdownParser {
                 indent: indent,
                 inlines: inlineSpans(in: ns, range: contentRange)
             ))
-            index = NSMaxRange(lineRange)
+            lineStart = lineEnd
         }
 
         if inCode {
-            flushCode(contentEnd: ns.length)
+            flushCode(contentEnd: length)
         }
 
-        return MarkdownDocument(text: ns, blocks: blocks)
+        return MarkdownDocument(text: ns, blocks: blocks, fenceCount: fenceCount)
     }
 
     // MARK: - Line helpers
 
-    private static func isRule(_ trimmed: String) -> Bool {
-        guard trimmed.count >= 3 else { return false }
-        let dashes = trimmed.allSatisfy { $0 == "-" || $0 == " " }
-        let stars = trimmed.allSatisfy { $0 == "*" || $0 == " " }
-        let unders = trimmed.allSatisfy { $0 == "_" || $0 == " " }
-        return (dashes && trimmed.contains("-")) || (stars && trimmed.contains("*")) || (unders && trimmed.contains("_"))
+    /// `-`, `*` or `_` at least three times, with nothing else but spaces.
+    private static func isRule(_ ns: NSString, from: Int, to: Int) -> Bool {
+        guard to - from >= 3 else { return false }
+        let c = char(ns, from)
+        guard c == 0x2D || c == 0x2A || c == 0x5F else { return false }
+        var count = 0
+        var i = from
+        while i < to {
+            let k = char(ns, i)
+            if k == c { count += 1 } else if k != 0x20 && k != 0x09 { return false }
+            i += 1
+        }
+        return count >= 3
     }
 
-    private static func headingMatch(_ line: String) -> (level: Int, markerLength: Int)? {
-        let ns = line as NSString
-        var i = 0
-        while i < ns.length, ns.character(at: i) == 0x20 || ns.character(at: i) == 0x09 { i += 1 }
-        var hashes = 0
-        while i + hashes < ns.length, ns.character(at: i + hashes) == 0x23 { hashes += 1 }
+    private static func fenceLength(_ ns: NSString, from: Int, to: Int) -> Int {
+        let c = char(ns, from)
+        guard c == 0x60 || c == 0x7E else { return 0 }
+        var i = from
+        while i < to, char(ns, i) == c { i += 1 }
+        return i - from
+    }
+
+    private static func isFenceLine(_ ns: NSString, from: Int, to: Int) -> Bool {
+        fenceLength(ns, from: from, to: to) >= 3
+    }
+
+    private static func headingMatch(_ ns: NSString, from: Int, to: Int) -> (level: Int, markerLength: Int)? {
+        var i = from
+        while i < to, char(ns, i) == 0x23 { i += 1 }
+        let hashes = i - from
         guard hashes >= 1, hashes <= 6 else { return nil }
-        let after = i + hashes
-        if after >= ns.length { return (hashes, after) }
-        guard ns.character(at: after) == 0x20 else { return nil }
-        return (hashes, after + 1)
+        if i >= to { return (hashes, hashes) }
+        guard char(ns, i) == 0x20 else { return nil }
+        return (hashes, hashes + 1)
     }
 
-    private static func quoteMatch(_ line: String) -> Int? {
-        let ns = line as NSString
-        var i = 0
-        while i < ns.length, ns.character(at: i) == 0x20 || ns.character(at: i) == 0x09 { i += 1 }
-        guard i < ns.length, ns.character(at: i) == 0x3E else { return nil }
-        var marker = i + 1
-        if marker < ns.length, ns.character(at: marker) == 0x20 { marker += 1 }
-        return marker
+    /// `- item`, `* item`, `+ item`. Returns the absolute index where the
+    /// content starts (after the marker and its trailing spaces).
+    private static func unorderedMatch(_ ns: NSString, from: Int, to: Int) -> Int? {
+        let c = char(ns, from)
+        guard c == 0x2D || c == 0x2A || c == 0x2B else { return nil }
+        var i = from + 1
+        guard i < to, isWhitespace(char(ns, i)) else { return nil }
+        while i < to, isWhitespace(char(ns, i)) { i += 1 }
+        return i
     }
 
-    private static func taskMatch(_ line: String) -> (markerOffset: Int, contentOffset: Int, done: Bool)? {
-        let ns = line as NSString
-        guard let regex = try? NSRegularExpression(pattern: "^(\\s*)([-*+])\\s+\\[([ xX])\\]\\s+") else { return nil }
-        guard let m = regex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        let boxRange = m.range(at: 3)
-        let done = ns.substring(with: boxRange).lowercased() == "x"
-        return (m.range(at: 1).length, m.range.length, done)
+    /// `- [ ] text` / `- [x] text`. Given the absolute content index just past
+    /// the bullet, returns where the task text starts and whether it is done.
+    private static func taskMatch(_ ns: NSString, after: Int, to: Int) -> (contentStart: Int, done: Bool)? {
+        guard after + 2 < to else { return nil }
+        guard char(ns, after) == 0x5B else { return nil }          // [
+        let state = char(ns, after + 1)
+        let done = state == 0x78 || state == 0x58                 // x or X
+        guard state == 0x20 || done else { return nil }
+        guard char(ns, after + 2) == 0x5D else { return nil }      // ]
+        var i = after + 3
+        guard i < to, isWhitespace(char(ns, i)) else { return nil }
+        while i < to, isWhitespace(char(ns, i)) { i += 1 }
+        return (i, done)
     }
 
-    private static func bulletMatch(_ line: String) -> (markerOffset: Int, contentOffset: Int)? {
-        let ns = line as NSString
-        guard let regex = try? NSRegularExpression(pattern: "^(\\s*)([-*+])\\s+") else { return nil }
-        guard let m = regex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        return (m.range(at: 1).length, m.range.length)
-    }
-
-    private static func numberedMatch(_ line: String) -> (markerOffset: Int, contentOffset: Int)? {
-        let ns = line as NSString
-        guard let regex = try? NSRegularExpression(pattern: "^(\\s*)(\\d{1,3}[.)])\\s+") else { return nil }
-        guard let m = regex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) else { return nil }
-        return (m.range(at: 1).length, m.range.length)
+    /// `1. text` or `1) text`, up to three digits. Returns the absolute index
+    /// where the content starts.
+    private static func numberedMatch(_ ns: NSString, from: Int, to: Int) -> Int? {
+        var i = from
+        var digits = 0
+        while i < to, char(ns, i) >= 0x30, char(ns, i) <= 0x39 {
+            i += 1
+            digits += 1
+            if digits > 3 { return nil }
+        }
+        guard digits >= 1, i < to else { return nil }
+        let sep = char(ns, i)
+        guard sep == 0x2E || sep == 0x29 else { return nil }       // . or )
+        i += 1
+        guard i < to, isWhitespace(char(ns, i)) else { return nil }
+        while i < to, isWhitespace(char(ns, i)) { i += 1 }
+        return i
     }
 
     // MARK: - Inline scanning

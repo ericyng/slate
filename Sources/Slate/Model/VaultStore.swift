@@ -18,16 +18,27 @@ final class VaultStore: ObservableObject {
     // MARK: Vault state
 
     @Published private(set) var vaultURL: URL?
-    @Published private(set) var notes: [Note] = []
+    @Published private(set) var notes: [Note] = [] {
+        didSet { rebuildSearchIndex(); invalidateDerived() }
+    }
     @Published private(set) var tree: [FolderNode] = []
     @Published private(set) var isLoaded = false
+    /// Live word count for the meta bar, refreshed on a short debounce rather
+    /// than recomputed from the whole document on every keystroke.
+    @Published private(set) var wordCount: Int = 0
 
     // MARK: UI state
 
-    @Published var sidebarSelection: SidebarSelection = .smart(.all)
+    @Published var sidebarSelection: SidebarSelection = .smart(.all) {
+        didSet { invalidateDerived() }
+    }
     @Published var selectedNoteID: String?
-    @Published var searchText: String = ""
-    @Published var sort: NoteSort = .modified
+    @Published var searchText: String = "" {
+        didSet { invalidateDerived() }
+    }
+    @Published var sort: NoteSort = .modified {
+        didSet { invalidateDerived() }
+    }
     @Published var layout: EditorLayout
     @Published var expandedFolders: Set<String> = []
     @Published var editorText: String = ""
@@ -43,9 +54,20 @@ final class VaultStore: ObservableObject {
     private var previousLayout: EditorLayout
     private var watcher: FSEventsWatcher?
     private var rescanTask: Task<Void, Never>?
+    private var scanTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
+    private var wordCountTask: Task<Void, Never>?
     private var pendingSaveID: String?
     private var lastSelfWrite = Date.distantPast
+
+    /// Derived lists are expensive (filter, case-folded search, sort) and the
+    /// views ask for them several times per render, so they are computed once
+    /// and invalidated when their inputs change.
+    private var cachedVisibleNotes: [Note]?
+    private var cachedTags: [String]?
+    /// Lowercased title + filename + body per note id, so a search does not
+    /// allocate a new lowercased copy of every note body on each keystroke.
+    private var searchIndex: [String: String] = [:]
 
     private static let metadataDir = ".slate"
     private static let lastVaultKey = "lastVaultPath"
@@ -74,13 +96,15 @@ final class VaultStore: ObservableObject {
         VaultRegistry.shared.register(self)
         window?.representedURL = target
         loadMetadata()
-        scan()
         isLoaded = true
         startWatchingIfNeeded()
-        if selectedNoteID == nil {
-            selectedNoteID = visibleNotes.first?.id
+        scan { [weak self] in
+            guard let self else { return }
+            if self.selectedNoteID == nil || self.note(self.selectedNoteID!) == nil {
+                self.selectedNoteID = self.visibleNotes.first?.id
+            }
+            self.loadEditorForSelection()
         }
-        loadEditorForSelection()
     }
 
     func closeVault() {
@@ -88,7 +112,10 @@ final class VaultStore: ObservableObject {
         watcher?.stop()
         watcher = nil
         rescanTask?.cancel()
+        scanTask?.cancel()
         saveTask?.cancel()
+        wordCountTask?.cancel()
+        MarkdownParseCache.shared.clear()
         vaultURL = nil
         notes = []
         tree = []
@@ -153,8 +180,23 @@ final class VaultStore: ObservableObject {
 
     private func startWatchingIfNeeded() {
         guard Preferences.shared.watchForExternalChanges, let url = vaultURL else { return }
-        watcher = FSEventsWatcher(url: url) { [weak self] in
-            self?.scheduleRescan()
+        watcher = FSEventsWatcher(url: url) { [weak self] paths in
+            guard let self else { return }
+            guard Self.affectsContent(paths) else { return }
+            self.scheduleRescan()
+        }
+    }
+
+    /// Everything lives inside the vault, including `.slate/metadata.json`, so
+    /// starring a note or moving the selection would otherwise look like an
+    /// external edit and trigger a full rescan.
+    nonisolated private static func affectsContent(_ paths: [String]) -> Bool {
+        if paths.isEmpty { return true }
+        return paths.contains { path in
+            let name = (path as NSString).lastPathComponent
+            if name == ".DS_Store" { return false }
+            if path.contains("/.slate/") { return false }
+            return true
         }
     }
 
@@ -171,8 +213,24 @@ final class VaultStore: ObservableObject {
 
     // MARK: - Scanning
 
-    private func scan() {
+    /// Reads the vault off the main thread: a large tree means thousands of
+    /// file reads and title/snippet derivations, which used to freeze the UI on
+    /// open and on every external-change rescan.
+    private func scan(completion: (() -> Void)? = nil) {
         guard let root = vaultURL else { return }
+        scanTask?.cancel()
+        scanTask = Task { [weak self] in
+            let snapshot = await Task.detached(priority: .userInitiated) {
+                Self.loadSnapshot(root: root)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.notes = snapshot.notes
+            self.buildTree(folderPaths: snapshot.folders)
+            completion?()
+        }
+    }
+
+    nonisolated private static func loadSnapshot(root: URL) -> (notes: [Note], folders: Set<String>) {
         let fm = FileManager.default
         var found: [Note] = []
         var folderPaths: Set<String> = [""]
@@ -180,9 +238,12 @@ final class VaultStore: ObservableObject {
         let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey, .creationDateKey, .fileSizeKey]
         guard let enumerator = fm.enumerator(at: root,
                                              includingPropertiesForKeys: keys,
-                                             options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return }
+                                             options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
+            return ([], folderPaths)
+        }
 
         let editors = ["code", "sublime-project", "xcodeproj"]
+        let rootPath = root.standardizedFileURL.path
         while let url = enumerator.nextObject() as? URL {
             if editors.contains(url.pathExtension) {
                 enumerator.skipDescendants()
@@ -190,29 +251,28 @@ final class VaultStore: ObservableObject {
             }
             let values = try? url.resourceValues(forKeys: Set(keys))
             if values?.isDirectory == true {
-                let rel = relativePath(of: url, in: root)
+                let rel = relativePath(url, rootPath: rootPath)
                 if !rel.isEmpty { folderPaths.insert(rel) }
                 continue
             }
             guard isMarkdown(url) else { continue }
             guard (values?.fileSize ?? 0) < 2_000_000 else { continue }
-            guard let body = Self.readText(url) else { continue }
-            let rel = relativePath(of: url, in: root)
+            guard let body = readText(url) else { continue }
+            let rel = relativePath(url, rootPath: rootPath)
             let folder = (rel as NSString).deletingLastPathComponent
             found.append(Note(
                 id: rel,
                 url: url,
                 folder: folder,
-                title: Self.deriveTitle(body, url: url),
-                snippet: Self.deriveSnippet(body),
+                title: deriveTitle(body, url: url),
+                snippet: deriveSnippet(body),
                 modified: values?.contentModificationDate ?? Date.distantPast,
                 created: values?.creationDate ?? values?.contentModificationDate ?? Date.distantPast,
                 body: body
             ))
         }
 
-        notes = found
-        buildTree(folderPaths: folderPaths)
+        return (found, folderPaths)
     }
 
     /// Rescan after an external change, keeping the note being edited intact.
@@ -231,34 +291,41 @@ final class VaultStore: ObservableObject {
         if Date().timeIntervalSince(lastSelfWrite) < 1.2, pendingSaveID == nil { return }
 
         let previous = Dictionary(uniqueKeysWithValues: notes.map { ($0.id, $0) })
-        scan()
-
-        if let id = selectedNoteID {
-            if let index = notes.firstIndex(where: { $0.id == id }) {
-                notes[index].body = editorText
-                notes[index].title = Self.deriveTitle(editorText, url: notes[index].url)
-                notes[index].snippet = Self.deriveSnippet(editorText)
-                if let old = previous[id], old.modified > notes[index].modified {
-                    notes[index].modified = old.modified
+        scan { [weak self] in
+            guard let self else { return }
+            guard let id = self.selectedNoteID else { return }
+            if let index = self.notes.firstIndex(where: { $0.id == id }) {
+                self.notes[index].body = self.editorText
+                self.notes[index].title = Self.deriveTitle(self.editorText, url: self.notes[index].url)
+                self.notes[index].snippet = Self.deriveSnippet(self.editorText)
+                if let old = previous[id], old.modified > self.notes[index].modified {
+                    self.notes[index].modified = old.modified
                 }
             } else {
-                selectedNoteID = nil
-                editorText = ""
+                self.selectedNoteID = nil
+                self.editorText = ""
             }
         }
     }
 
-    private func isMarkdown(_ url: URL) -> Bool {
+    nonisolated private static func isMarkdown(_ url: URL) -> Bool {
         ["md", "markdown", "mdown", "txt"].contains(url.pathExtension.lowercased())
     }
 
-    private func relativePath(of url: URL, in root: URL) -> String {
-        let rootPath = root.standardizedFileURL.path
+    nonisolated private static func relativePath(_ url: URL, rootPath: String) -> String {
         let path = url.standardizedFileURL.path
         guard path.hasPrefix(rootPath) else { return url.lastPathComponent }
         var rel = String(path.dropFirst(rootPath.count))
         if rel.hasPrefix("/") { rel.removeFirst() }
         return rel
+    }
+
+    private func relativePath(of url: URL, in root: URL) -> String {
+        Self.relativePath(url, rootPath: root.standardizedFileURL.path)
+    }
+
+    private func isMarkdown(_ url: URL) -> Bool {
+        Self.isMarkdown(url)
     }
 
     private func buildTree(folderPaths: Set<String>) {
@@ -320,6 +387,13 @@ final class VaultStore: ObservableObject {
     }
 
     var visibleNotes: [Note] {
+        if let cachedVisibleNotes { return cachedVisibleNotes }
+        let result = computeVisibleNotes()
+        cachedVisibleNotes = result
+        return result
+    }
+
+    private func computeVisibleNotes() -> [Note] {
         var result: [Note]
 
         switch sidebarSelection {
@@ -343,9 +417,7 @@ final class VaultStore: ObservableObject {
         let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
         if !query.isEmpty {
             result = result.filter { note in
-                note.title.lowercased().contains(query)
-                    || note.filename.lowercased().contains(query)
-                    || note.body.lowercased().contains(query)
+                searchIndex[note.id]?.contains(query) ?? false
             }
         }
 
@@ -364,10 +436,26 @@ final class VaultStore: ObservableObject {
         return starredNotes + others
     }
 
+    private func invalidateDerived() {
+        cachedVisibleNotes = nil
+        cachedTags = nil
+    }
+
+    private func rebuildSearchIndex() {
+        searchIndex = Dictionary(uniqueKeysWithValues: notes.map { note in
+            (note.id, Self.searchableText(title: note.title, filename: note.filename, body: note.body))
+        })
+    }
+
+    nonisolated private static func searchableText(title: String, filename: String, body: String) -> String {
+        title.lowercased() + "\n" + filename.lowercased() + "\n" + body.lowercased()
+    }
+
     var allNotesCount: Int { notes.count }
-    var starredCount: Int { notes.filter { starred.contains($0.id) }.count }
+    var starredCount: Int { notes.reduce(0) { $0 + (starred.contains($1.id) ? 1 : 0) } }
 
     var allTags: [String] {
+        if let cachedTags { return cachedTags }
         var set = Set<String>()
         for note in notes {
             var i = note.body.startIndex
@@ -382,7 +470,9 @@ final class VaultStore: ObservableObject {
                 i = j
             }
         }
-        return set.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        let sorted = set.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        cachedTags = sorted
+        return sorted
     }
 
     var selectionTitle: String {
@@ -468,8 +558,10 @@ final class VaultStore: ObservableObject {
     private func loadEditorForSelection() {
         if let note = selectedNote {
             editorText = note.body
+            refreshWordCount(note.body)
         } else {
             editorText = ""
+            refreshWordCount("")
         }
     }
 
@@ -477,7 +569,21 @@ final class VaultStore: ObservableObject {
         guard let id = selectedNoteID else { return }
         guard text != editorText else { return }
         editorText = text
+        refreshWordCount(text)
         scheduleSave(id: id, text: text)
+    }
+
+    /// Word counts are for the meta bar, not for saving: a short debounce keeps
+    /// the whole-document split off the typing path.
+    private func refreshWordCount(_ text: String) {
+        wordCountTask?.cancel()
+        wordCountTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let count = text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
+            guard let self, self.wordCount != count else { return }
+            self.wordCount = count
+        }
     }
 
     private func scheduleSave(id: String, text: String) {
@@ -512,6 +618,9 @@ final class VaultStore: ObservableObject {
         notes[index].title = Self.deriveTitle(text, url: url)
         notes[index].snippet = Self.deriveSnippet(text)
         notes[index].modified = Date()
+        searchIndex[id] = Self.searchableText(title: notes[index].title,
+                                              filename: url.lastPathComponent,
+                                              body: text)
         if pendingSaveID == id { pendingSaveID = nil }
         maybeAutoRename(index: index)
     }
