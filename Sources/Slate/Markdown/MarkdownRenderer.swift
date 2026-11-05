@@ -382,7 +382,7 @@ enum MarkdownRenderer {
                 case .wikilink:
                     attrs[.foregroundColor] = MarkdownTheme.accentColor
                     attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
-                case .tag(let name):
+                case .tag:
                     attrs[.foregroundColor] = MarkdownTheme.accentColor
                 }
             }

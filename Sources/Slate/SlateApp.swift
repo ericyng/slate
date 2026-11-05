@@ -10,7 +10,7 @@ struct SlateApp: App {
             VaultWindowView()
         }
         .defaultSize(width: 1440, height: 880)
-        .windowToolbarStyle(.unified)
+        .windowToolbarStyle(.unifiedCompact)
         .commands { SlateCommands() }
 
         Settings {

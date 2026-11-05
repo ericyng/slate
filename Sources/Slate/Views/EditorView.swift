@@ -299,7 +299,7 @@ struct MarkdownPreview: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? NSTextView else { return }
+        guard scrollView.documentView is NSTextView else { return }
         let coordinator = context.coordinator
         coordinator.scrollView = scrollView
         // Typing fires this on every keystroke; skip the work when nothing changed.
