@@ -4,45 +4,56 @@ import AppKit
 struct NoteListView: View {
     @EnvironmentObject private var store: VaultStore
     @Environment(\.renameRequest) private var rename
-    @State private var hoveredID: String?
+
+    /// `List` drives selection, arrow keys and keyboard focus. Clearing the
+    /// selection is ignored so the detail pane always has a note.
+    private var selection: Binding<String?> {
+        Binding(
+            get: { store.selectedNoteID },
+            set: { if let id = $0 { store.select(noteID: id) } }
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            searchBar
-            Divider()
+            Divider().opacity(0.6)
 
             if store.visibleNotes.isEmpty {
                 emptyState
             } else {
-                ScrollView(.vertical) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(store.visibleNotes) { note in
-                            NoteRow(
-                                note: note,
-                                isSelected: note.id == store.selectedNoteID,
-                                isStarred: store.starred.contains(note.id),
-                                isHovered: hoveredID == note.id
-                            )
-                            .onTapGesture { store.select(noteID: note.id) }
-                            .onHover { hoveredID = $0 ? note.id : (hoveredID == note.id ? nil : hoveredID) }
-                            .contextMenu {
-                                Button(store.starred.contains(note.id) ? "Unstar" : "Star") {
-                                    store.toggleStar(note.id)
-                                }
-                                Button("Rename…") {
-                                    rename.begin(note.id, note.url.deletingPathExtension().lastPathComponent)
-                                }
-                                Divider()
-                                Button("Open in Default App") { store.openInEditor(note.id) }
-                                Button("Reveal in Finder") { store.revealInFinder(note.id) }
-                                Divider()
-                                Button("Move to Trash") { store.deleteNote(id: note.id) }
+                List(selection: selection) {
+                    ForEach(store.visibleNotes) { note in
+                        NoteRow(
+                            note: note,
+                            isStarred: store.starred.contains(note.id)
+                        )
+                        .tag(note.id)
+                        .listRowInsets(EdgeInsets(top: 5, leading: 12, bottom: 5, trailing: 12))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(
+                            note.id == store.selectedNoteID
+                                ? Color.accentColor.opacity(0.16)
+                                : Color.clear
+                        )
+                        .contextMenu {
+                            Button(store.starred.contains(note.id) ? "Unstar" : "Star") {
+                                store.toggleStar(note.id)
                             }
+                            Button("Rename…") {
+                                rename.begin(note.id, note.url.deletingPathExtension().lastPathComponent)
+                            }
+                            Divider()
+                            Button("Open in Default App") { store.openInEditor(note.id) }
+                            Button("Reveal in Finder") { store.revealInFinder(note.id) }
+                            Divider()
+                            Button("Move to Trash") { store.deleteNote(id: note.id) }
                         }
                     }
-                    .padding(.vertical, 4)
                 }
+                .listStyle(.inset)
+                .environment(\.defaultMinListRowHeight, 44)
+                .scrollContentBackground(.hidden)
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
@@ -59,6 +70,15 @@ struct NoteListView: View {
                 .foregroundStyle(.tertiary)
 
             Spacer(minLength: 0)
+
+            Button {
+                store.createNote()
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 11.5))
+            }
+            .buttonStyle(.borderless)
+            .help("New note (⌘N)")
 
             Menu {
                 Picker("Sort By", selection: $store.sort) {
@@ -77,43 +97,11 @@ struct NoteListView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .frame(width: 22)
+            .help("Sort and create")
         }
         .padding(.horizontal, 14)
-        .padding(.top, 12)
+        .padding(.top, 10)
         .padding(.bottom, 8)
-    }
-
-    private var searchBar: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            TextField("Search", text: $store.searchText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-            if !store.searchText.isEmpty {
-                Button {
-                    store.searchText = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(Color(nsColor: .textBackgroundColor))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-                )
-        )
-        .padding(.horizontal, 10)
-        .padding(.bottom, 10)
     }
 
     private var emptyState: some View {
@@ -129,6 +117,10 @@ struct NoteListView: View {
                 Button("New Note") { store.createNote() }
                     .buttonStyle(.link)
                     .font(.system(size: 12))
+            } else {
+                Button("Clear Search") { store.searchText = "" }
+                    .buttonStyle(.link)
+                    .font(.system(size: 12))
             }
             Spacer()
         }
@@ -138,9 +130,7 @@ struct NoteListView: View {
 
 struct NoteRow: View {
     let note: Note
-    let isSelected: Bool
     let isStarred: Bool
-    let isHovered: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -148,41 +138,23 @@ struct NoteRow: View {
                 Text(note.title)
                     .font(.system(size: 12.8, weight: .semibold))
                     .lineLimit(1)
-                    .foregroundStyle(isSelected ? Color.white : Color.primary)
                 if isStarred {
                     Image(systemName: "star.fill")
                         .font(.system(size: 8.5))
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.orange)
+                        .foregroundStyle(.orange)
                 }
                 Spacer(minLength: 4)
                 Text(DateText.listStamp(note.modified))
                     .font(.system(size: 10.5))
                     .monospacedDigit()
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.8) : Color.secondary)
+                    .foregroundStyle(.secondary)
             }
-            HStack(spacing: 4) {
-                Text(note.snippet)
-                    .font(.system(size: 11.5))
-                    .lineLimit(1)
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
-            }
+            Text(note.snippet)
+                .font(.system(size: 11.5))
+                .lineLimit(1)
+                .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            Group {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.accentColor)
-                        .padding(.horizontal, 6)
-                } else if isHovered {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.primary.opacity(0.05))
-                        .padding(.horizontal, 6)
-                }
-            }
-        )
         .contentShape(Rectangle())
     }
 }
