@@ -7,6 +7,12 @@ enum SidebarSelection: Hashable {
     case tag(String)
 }
 
+/// A folder prepared for the source list: the node plus how deep to indent it.
+struct SidebarFolderEntry: Hashable {
+    let node: FolderNode
+    let depth: Int
+}
+
 @MainActor
 final class VaultStore: ObservableObject {
 
@@ -362,6 +368,22 @@ final class VaultStore: ObservableObject {
                    name: "Vault Root",
                    children: tree,
                    noteCount: notes.reduce(0) { $0 + ($1.folder.isEmpty ? 1 : 0) })
+    }
+
+    /// Folders flattened in display order, honouring the store's expansion
+    /// state. A `List` needs a flat sequence; rebuilding it is cheap because the
+    /// sidebar only holds notebook paths, not notes.
+    var sidebarFolders: [SidebarFolderEntry] {
+        var entries: [SidebarFolderEntry] = []
+        func walk(_ node: FolderNode, depth: Int) {
+            entries.append(SidebarFolderEntry(node: node, depth: depth))
+            guard expandedFolders.contains(node.id) else { return }
+            for child in node.children {
+                walk(child, depth: depth + 1)
+            }
+        }
+        walk(rootNode, depth: 0)
+        return entries
     }
 
     /// Every folder id in the tree, for Expand All.
