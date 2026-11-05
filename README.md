@@ -24,6 +24,7 @@ Then press **Choose Vault…** and pick any folder (or **Create Sample Vault** t
 | [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | Every feature, shortcut and workflow, plus troubleshooting |
 | [docs/BUILDING.md](docs/BUILDING.md) | Building, running, testing, packaging, icons, signing, Xcode |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Code map, data flow, markdown pipeline, extension points |
+| [docs/UI_REDESIGN.md](docs/UI_REDESIGN.md) | Performance baseline and the plan for native chrome and Liquid Glass |
 | [PLAN.md](PLAN.md) | How it was planned and what is done / next |
 
 ## Features
