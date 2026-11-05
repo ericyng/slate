@@ -16,7 +16,9 @@ struct VaultWindowView: View {
             .navigationTitle(store.vaultURL == nil ? "Slate" : store.vaultName)
             .background(WindowAccessor { window in
                 store.attach(window: window)
+                if let window { WindowChrome.apply(to: window) }
             })
+            .modifier(WindowMaterial())
             .onAppear(perform: bootstrap)
             .onChange(of: prefs.watchForExternalChanges) { _, _ in
                 store.refreshWatcher()

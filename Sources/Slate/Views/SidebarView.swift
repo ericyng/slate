@@ -81,7 +81,6 @@ struct SidebarView: View {
                 .padding(.horizontal, 8)
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var header: some View {

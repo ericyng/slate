@@ -6,6 +6,8 @@ struct ContentView: View {
     @State private var renameTarget: String?
     @State private var renameText = ""
     @State private var observesTermination = false
+    /// Per-window column state; the system remembers the sidebar width.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
         Group {
@@ -54,16 +56,18 @@ struct ContentView: View {
     }
 
     private var mainLayout: some View {
-        HStack(spacing: 0) {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView()
-                .frame(width: 236)
-            Divider()
+                .navigationSplitViewColumnWidth(min: 200, ideal: 236, max: 340)
+        } content: {
             NoteListView()
-                .frame(width: 306)
-            Divider()
+                .navigationSplitViewColumnWidth(min: 250, ideal: 306, max: 460)
+        } detail: {
             DetailView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .navigationSplitViewStyle(.balanced)
+        // Content fades under the toolbar instead of a hard line appearing.
+        .modifier(ScrollEdgeFade())
     }
 
     @ToolbarContentBuilder
