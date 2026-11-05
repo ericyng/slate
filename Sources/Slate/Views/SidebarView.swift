@@ -86,9 +86,14 @@ struct SidebarView: View {
         .buttonStyle(.borderless)
         .font(.system(size: 11))
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(.bar)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        // One floating capsule, so the sidebar footer reads as chrome over the
+        // source list rather than another row in it.
+        .slateGlass(cornerRadius: 13)
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
     }
 
     private func count(for filter: SidebarFilter) -> Int {

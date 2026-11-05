@@ -79,6 +79,7 @@ struct ContentView: View {
             } label: {
                 Label("New Note", systemImage: "square.and.pencil")
             }
+            .slateProminentButton()
             .help("New note (⌘N)")
             .disabled(store.vaultURL == nil)
         }

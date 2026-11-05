@@ -1,6 +1,6 @@
 # Making Slate feel native: performance and Liquid Glass plan
 
-Status: phases 1–2 shipped, phases 3–8 still a proposal. Baseline for the numbers below is
+Status: phases 1–3 shipped, phases 4–8 still a proposal. Baseline for the numbers below is
 `e5cd0a6` (perf overhaul), macOS 26.6, Swift 6.4, deployment target macOS 14.
 
 The goal is not "Slate with a blur behind it". It is Slate that looks and behaves like an
@@ -39,8 +39,9 @@ opposite of the system look. Phase 3 replaces them with one availability-gated g
 | --- | --- |
 | 1 — Split view and window chrome | shipped, merged to `main` |
 | 2 — Native sidebar and note list | shipped, merged to `main` |
-| 3 — One Liquid Glass layer | next |
-| 4–8 | not started |
+| 3 — One Liquid Glass layer | shipped, merged to `main` |
+| 4 — Editor chrome and typography | next |
+| 5–8 | not started |
 
 Deviations from the phase text below, recorded so later phases do not re-plan around them:
 
@@ -51,6 +52,16 @@ Deviations from the phase text below, recorded so later phases do not re-plan ar
   All / Title / Body `.searchScopes` are not implemented.
 - The window background material is `.thinMaterial`; a custom `.ultraThinMaterial` note-list
   background was tried and reverted because it fought the split view's own vibrancy.
+
+Phase 3 shipped as `Support/GlassSupport.swift`: `slateGlass(cornerRadius:tint:interactive:)`,
+`slateProminentButton()`, `GlassGroup` (a `GlassEffectContainer` with a pre-26 passthrough)
+and `GlassSupport.surface`. Glass sits on exactly three surfaces — the toolbar's New Note
+button, the sidebar footer capsule and the welcome card — and nowhere else. The fallback
+chain is native glass on 26 → `.ultraThinMaterial` before 26 → an opaque
+`windowBackgroundColor` surface with a hairline border under Reduce Transparency or Increase
+Contrast; `SLATE_OPAQUE_CHROME=1` forces the opaque branch for testing. Not built yet:
+`glassEffectID` merging between footer controls, and `.glassEffectTransition(.materialize)`
+on vault open.
 
 ## Design principles
 
