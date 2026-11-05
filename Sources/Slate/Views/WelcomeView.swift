@@ -32,6 +32,7 @@ struct WelcomeView: View {
                     }
                     .keyboardShortcut(.defaultAction)
                     .controlSize(.large)
+                    .slateProminentButton()
 
                     Button("Create Sample Vault") {
                         if let url = SampleVault.create() {
@@ -43,6 +44,11 @@ struct WelcomeView: View {
                 .padding(.top, 8)
             }
             .frame(maxWidth: 430)
+            .padding(.horizontal, 30)
+            .padding(.vertical, 28)
+            // The one place glass sits under text: a landing card, not a page
+            // you read. Reduce Transparency turns it opaque.
+            .slateGlass(cornerRadius: 24)
 
             Spacer()
 
@@ -52,7 +58,18 @@ struct WelcomeView: View {
                 .padding(.bottom, 18)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background {
+            ZStack {
+                Color(nsColor: .windowBackgroundColor)
+                RadialGradient(
+                    colors: [Color.accentColor.opacity(0.16), Color.accentColor.opacity(0)],
+                    center: UnitPoint(x: 0.5, y: 0.34),
+                    startRadius: 30,
+                    endRadius: 480
+                )
+            }
+            .ignoresSafeArea()
+        }
     }
 
     private func feature(_ symbol: String, _ title: String, _ detail: String) -> some View {
