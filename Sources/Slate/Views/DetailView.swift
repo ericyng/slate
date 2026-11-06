@@ -55,7 +55,9 @@ struct DetailView: View {
 
         case .preview:
             pane {
-                MarkdownPreview(text: store.editorText, bodySize: prefs.bodyFontSize)
+                MarkdownPreview(text: store.editorText,
+                                bodySize: prefs.bodyFontSize,
+                                onToggleTask: { store.toggleTask(at: $0) })
             }
 
         case .split:
@@ -67,7 +69,9 @@ struct DetailView: View {
                 )
                 .frame(minWidth: 260, idealWidth: 420)
 
-                MarkdownPreview(text: store.editorText, bodySize: prefs.bodyFontSize)
+                MarkdownPreview(text: store.editorText,
+                                bodySize: prefs.bodyFontSize,
+                                onToggleTask: { store.toggleTask(at: $0) })
                     .frame(minWidth: 260, idealWidth: 420)
             }
         }

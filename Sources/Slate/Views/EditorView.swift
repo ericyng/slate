@@ -86,6 +86,11 @@ struct MarkdownEditor: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 10, height: 22)
         textView.textContainer?.lineFragmentPadding = 2
         textView.insertionPointColor = .controlAccentColor
+        // Naive SwiftUI-ish selection is a blue block; the accent tint with the
+        // text still legible underneath is what native editors do.
+        textView.selectedTextAttributes = [
+            .backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.24)
+        ]
         textView.typingAttributes = [
             .font: MarkdownTheme.body(size: bodySize),
             .foregroundColor: MarkdownTheme.bodyColor,
@@ -270,6 +275,8 @@ struct MarkdownEditor: NSViewRepresentable {
 struct MarkdownPreview: NSViewRepresentable {
     let text: String
     var bodySize: CGFloat = MarkdownTheme.bodySize
+    /// Called with the source offset of a task line when its checkbox is clicked.
+    var onToggleTask: ((Int) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -283,12 +290,27 @@ struct MarkdownPreview: NSViewRepresentable {
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
 
-        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
+        // Swap the plain text view for one that can report a click on a task
+        // checkbox, keeping the configuration `scrollableTextView()` installed.
+        guard let template = scrollView.documentView as? NSTextView else { return scrollView }
+        let textView = PreviewTextView(frame: template.frame)
+        textView.minSize = template.minSize
+        textView.maxSize = template.maxSize
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = template.autoresizingMask
+        textView.textContainer?.widthTracksTextView = true
+        textView.onToggleTask = onToggleTask
+        scrollView.documentView = textView
+
         textView.isEditable = false
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 10, height: 22)
         textView.textContainer?.lineFragmentPadding = 2
+        textView.selectedTextAttributes = [
+            .backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.24)
+        ]
         textView.linkTextAttributes = [
             .foregroundColor: MarkdownTheme.accentColor,
             .underlineStyle: NSUnderlineStyle.single.rawValue
@@ -299,9 +321,10 @@ struct MarkdownPreview: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard scrollView.documentView is NSTextView else { return }
+        guard let textView = scrollView.documentView as? PreviewTextView else { return }
         let coordinator = context.coordinator
         coordinator.scrollView = scrollView
+        textView.onToggleTask = onToggleTask
         // Typing fires this on every keystroke; skip the work when nothing changed.
         guard coordinator.renderedText != text || coordinator.renderedSize != bodySize else { return }
 
@@ -360,5 +383,40 @@ struct MarkdownPreview: NSViewRepresentable {
             scrollView.contentView.scroll(to: target)
             scrollView.reflectScrolledClipView(scrollView.contentView)
         }
+    }
+}
+
+/// Read-mode text view: a click on a task checkbox becomes an edit request
+/// instead of a caret move. Everything else falls through to the system.
+final class PreviewTextView: NSTextView {
+    var onToggleTask: ((Int) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        if let location = taskLocation(for: event) {
+            onToggleTask?(location)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    /// The source offset carried by the checkbox under the pointer, if the
+    /// click actually landed on one. `glyphIndex(for:in:)` always returns the
+    /// nearest glyph, so the bounding rect has to confirm the hit.
+    func taskLocation(for event: NSEvent) -> Int? {
+        guard let layoutManager, let container = textContainer, let storage = textStorage else { return nil }
+        let point = convert(event.locationInWindow, from: nil)
+        let inContainer = NSPoint(x: point.x - textContainerOrigin.x,
+                                  y: point.y - textContainerOrigin.y)
+
+        let glyphIndex = layoutManager.glyphIndex(for: inContainer, in: container)
+        let rect = layoutManager.boundingRect(
+            forGlyphRange: NSRange(location: glyphIndex, length: 1),
+            in: container
+        )
+        guard rect.insetBy(dx: -2, dy: -3).contains(inContainer) else { return nil }
+
+        let charIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+        guard charIndex < storage.length else { return nil }
+        return storage.attribute(.slateTaskLocation, at: charIndex, effectiveRange: nil) as? Int
     }
 }

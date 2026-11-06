@@ -4,6 +4,15 @@ enum MarkdownTheme {
     static let bodySize: CGFloat = 15
     static let monoSize: CGFloat = 13
 
+    /// Body size that follows the system text size. macOS scales
+    /// `preferredFont(forTextStyle:)` with the per-app Text Size setting, so a
+    /// fresh install reads at the size the system asks for, with two points of
+    /// extra room because this is prose, not UI.
+    static var preferredBodySize: CGFloat {
+        let system = NSFont.preferredFont(forTextStyle: .body).pointSize
+        return (system + 2).rounded()
+    }
+
     static func headingScale(_ level: Int) -> CGFloat {
         switch level {
         case 1: return 1.66
@@ -270,23 +279,35 @@ enum MarkdownRenderer {
                 out.append(NSAttributedString(string: "\n", attributes: base))
 
             case .bullet, .numbered, .task:
-                var prefix = "•  "
-                if case .numbered = block.kind {
-                    prefix = doc.text.substring(with: block.markerRange ?? NSRange(location: 0, length: 0))
-                }
-                if case .task(let done) = block.kind {
-                    prefix = done ? "☑  " : "☐  "
-                }
+                let bulletStyle = paragraphStyle(for: .bullet, indent: block.indent, bodySize: bodySize)
                 let base: [NSAttributedString.Key: Any] = [
                     .font: MarkdownTheme.body(size: bodySize),
                     .foregroundColor: MarkdownTheme.bodyColor,
-                    .paragraphStyle: paragraphStyle(for: .bullet, indent: block.indent, bodySize: bodySize)
+                    .paragraphStyle: bulletStyle
                 ]
-                out.append(NSAttributedString(string: prefix, attributes: [
-                    .font: MarkdownTheme.body(size: bodySize),
-                    .foregroundColor: block.kind == .task(done: true) || prefix == "☑  " ? MarkdownTheme.tertiaryColor : MarkdownTheme.secondaryColor,
-                    .paragraphStyle: paragraphStyle(for: .bullet, indent: block.indent, bodySize: bodySize)
-                ]))
+                if case .task(let done) = block.kind {
+                    // A real checkbox you can click, not a glyph: clicking it
+                    // writes `- [x]` back to the source line.
+                    let box = NSMutableAttributedString(attributedString: TaskCheckbox.attachment(
+                        done: done,
+                        sourceLocation: block.range.location,
+                        bodySize: bodySize
+                    ))
+                    box.addAttribute(.paragraphStyle,
+                                     value: bulletStyle,
+                                     range: NSRange(location: 0, length: box.length))
+                    out.append(box)
+                } else {
+                    var prefix = "•  "
+                    if case .numbered = block.kind {
+                        prefix = doc.text.substring(with: block.markerRange ?? NSRange(location: 0, length: 0))
+                    }
+                    out.append(NSAttributedString(string: prefix, attributes: [
+                        .font: MarkdownTheme.body(size: bodySize),
+                        .foregroundColor: MarkdownTheme.secondaryColor,
+                        .paragraphStyle: bulletStyle
+                    ]))
+                }
                 out.append(inline(doc: doc, block: block, base: base, bodySize: bodySize))
                 out.append(NSAttributedString(string: "\n", attributes: base))
 

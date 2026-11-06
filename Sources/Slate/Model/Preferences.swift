@@ -149,7 +149,7 @@ final class Preferences: ObservableObject {
         self.defaults = defaults
         defaults.register(defaults: [
             Key.theme: AppTheme.system.rawValue,
-            Key.bodyFontSize: 15.0,
+            Key.bodyFontSize: Double(MarkdownTheme.preferredBodySize),
             Key.defaultLayout: EditorLayout.live.rawValue,
             Key.contentWidth: 760.0,
             Key.autosaveDelay: 0.4,
