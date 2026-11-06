@@ -595,6 +595,44 @@ final class VaultStore: ObservableObject {
         scheduleSave(id: id, text: text)
     }
 
+    /// Flips the checkbox on the task line that starts at `lineStart`.
+    ///
+    /// Reading mode renders a task as a real checkbox rather than the source
+    /// marker, so a click there has to become an edit to the text. It goes
+    /// through `updateEditorText`, so the editor, the autosave and the rendered
+    /// page all see the same string, and the file stays the only truth.
+    func toggleTask(at lineStart: Int) {
+        let ns = editorText as NSString
+        guard ns.length > 0, lineStart >= 0, lineStart < ns.length else { return }
+        let lineRange = ns.lineRange(for: NSRange(location: lineStart, length: 0))
+        let line = ns.substring(with: lineRange) as NSString
+
+        let open = line.range(of: "[ ]")
+        let checked = line.range(of: "[x]")
+        let checkedUpper = line.range(of: "[X]")
+
+        let marker: NSRange
+        let replacement: String
+        if open.location != NSNotFound {
+            marker = open
+            replacement = "[x]"
+        } else if checked.location != NSNotFound {
+            marker = checked
+            replacement = "[ ]"
+        } else if checkedUpper.location != NSNotFound {
+            marker = checkedUpper
+            replacement = "[ ]"
+        } else {
+            return
+        }
+
+        let target = NSRange(location: lineRange.location + marker.location, length: marker.length)
+        updateEditorText(ns.replacingCharacters(in: target, with: replacement))
+        // A click is a deliberate edit, not typing: write it now so the file
+        // matches what the reader just saw.
+        flushSave()
+    }
+
     /// Word counts are for the meta bar, not for saving: a short debounce keeps
     /// the whole-document split off the typing path.
     private func refreshWordCount(_ text: String) {

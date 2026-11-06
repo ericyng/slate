@@ -40,8 +40,8 @@ opposite of the system look. Phase 3 replaces them with one availability-gated g
 | 1 — Split view and window chrome | shipped, merged to `main` |
 | 2 — Native sidebar and note list | shipped, merged to `main` |
 | 3 — One Liquid Glass layer | shipped, merged to `main` |
-| 4 — Editor chrome and typography | next |
-| 5–8 | not started |
+| 4 — Editor chrome and typography | shipped, merged to `main` |
+| 5 — Motion and micro-detail | next |
 
 Deviations from the phase text below, recorded so later phases do not re-plan around them:
 
@@ -62,6 +62,17 @@ chain is native glass on 26 → `.ultraThinMaterial` before 26 → an opaque
 Contrast; `SLATE_OPAQUE_CHROME=1` forces the opaque branch for testing. Not built yet:
 `glassEffectID` merging between footer controls, and `.glassEffectTransition(.materialize)`
 on vault open.
+
+Phase 4 shipped the reading measure (already capped at 760 pt and centred before this phase,
+so the phase's 720 pt note was not needed), a system-derived type ramp
+(`MarkdownTheme.preferredBodySize` from `NSFont.preferredFont(forTextStyle: .body)` plus two
+points, used as the `bodyFontSize` default), accent-tinted selection in both panes
+(`selectedTextAttributes` at 24% accent instead of the system block), and clickable task
+checkboxes: the renderer emits an `NSTextAttachment` carrying `.slateTaskLocation` (the source
+line offset), `PreviewTextView` hit-tests the glyph, and `VaultStore.toggleTask(at:)` rewrites
+`- [ ]`/`- [x]` in the buffer and flushes the save, so the file stays the only truth. Deferred
+to a review of the visual result: `NSTextBlock` rounded code and quote blocks with a quote
+accent bar, `NSTextTable` tables, a focus ring on the pane, and focus dimming.
 
 ## Design principles
 

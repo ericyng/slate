@@ -79,7 +79,22 @@ final class MarkdownTests: XCTestCase {
         XCTAssertTrue(rendered.contains("Title"))
         XCTAssertTrue(rendered.contains("bold"))
         XCTAssertTrue(rendered.contains("•  a bullet"))
-        XCTAssertTrue(rendered.contains("☑"))
+        XCTAssertTrue(rendered.contains("a task"))
+        // A task renders as a checkbox attachment, not a glyph, so the click
+        // target can write back to the source line it came from.
+        XCTAssertFalse(rendered.contains("☑"))
+    }
+
+    func testTaskCheckboxCarriesSourceLine() {
+        let text = "intro\n\n- [ ] first\n- [x] second\n"
+        let rendered = MarkdownRenderer.rendered(MarkdownParser.parse(text))
+        var locations: [Int] = []
+        rendered.enumerateAttribute(.slateTaskLocation,
+                                   in: NSRange(location: 0, length: rendered.length)) { value, _, _ in
+            if let offset = value as? Int { locations.append(offset) }
+        }
+        let ns = text as NSString
+        XCTAssertEqual(locations, [ns.range(of: "- [ ]").location, ns.range(of: "- [x]").location])
     }
 
     func testEditorRunsCoverWholeDocument() {
